@@ -25,11 +25,16 @@ import (
 
 	// State Stores
 	"github.com/dapr/components-contrib/state"
+	"github.com/dapr/components-contrib/state/aerospike"
 	state_cosmosdb "github.com/dapr/components-contrib/state/azure/cosmosdb"
+	state_azure_tablestorage "github.com/dapr/components-contrib/state/azure/tablestorage"
 	"github.com/dapr/components-contrib/state/cassandra"
+	"github.com/dapr/components-contrib/state/cloudstate"
+	"github.com/dapr/components-contrib/state/couchbase"
 	"github.com/dapr/components-contrib/state/etcd"
 	"github.com/dapr/components-contrib/state/gcp/firestore"
 	"github.com/dapr/components-contrib/state/hashicorp/consul"
+	"github.com/dapr/components-contrib/state/hazelcast"
 	"github.com/dapr/components-contrib/state/memcached"
 	"github.com/dapr/components-contrib/state/mongodb"
 	state_redis "github.com/dapr/components-contrib/state/redis"
@@ -76,6 +81,7 @@ import (
 	"github.com/dapr/components-contrib/bindings/mqtt"
 	bindings_rabbitmq "github.com/dapr/components-contrib/bindings/rabbitmq"
 	"github.com/dapr/components-contrib/bindings/redis"
+	"github.com/dapr/components-contrib/bindings/twilio"
 	bindings_loader "github.com/dapr/dapr/pkg/components/bindings"
 
 	// HTTP Middleware
@@ -92,7 +98,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	rt.Run(
+	err = rt.Run(
 		runtime.WithSecretStores(
 			secretstores_loader.New("kubernetes", sercetstores_kubernetes.NewKubernetesSecretStore),
 			secretstores_loader.New("azure.keyvault", keyvault.NewAzureKeyvaultSecretStore),
@@ -107,6 +113,9 @@ func main() {
 			}),
 			state_loader.New("azure.cosmosdb", func() state.Store {
 				return state_cosmosdb.NewCosmosDBStateStore()
+			}),
+			state_loader.New("azure.tablestorage", func() state.Store {
+				return state_azure_tablestorage.NewAzureTablesStateStore()
 			}),
 			state_loader.New("etcd", func() state.Store {
 				return etcd.NewETCD()
@@ -128,6 +137,18 @@ func main() {
 			}),
 			state_loader.New("sqlserver", func() state.Store {
 				return sqlserver.NewSQLServerStateStore()
+			}),
+			state_loader.New("hazelcast", func() state.Store {
+				return hazelcast.NewHazelcastStore()
+			}),
+			state_loader.New("cloudstate.crdt", func() state.Store {
+				return cloudstate.NewCRDT()
+			}),
+			state_loader.New("couchbase", func() state.Store {
+				return couchbase.NewCouchbaseStateStore()
+			}),
+			state_loader.New("aerospike", func() state.Store {
+				return aerospike.NewAerospikeStateStore()
 			}),
 		),
 		runtime.WithPubSubs(
@@ -230,6 +251,9 @@ func main() {
 			bindings_loader.NewOutput("azure.signalr", func() bindings.OutputBinding {
 				return signalr.NewSignalR()
 			}),
+			bindings_loader.NewOutput("twilio.sms", func() bindings.OutputBinding {
+				return twilio.NewSMS()
+			}),
 		),
 		runtime.WithHTTPMiddleware(
 			http_middleware_loader.New("uppercase", func(metadata middleware.Metadata) http_middleware.Middleware {
@@ -247,6 +271,9 @@ func main() {
 			}),
 		),
 	)
+	if err != nil {
+		log.Fatalf("fatal error from runtime: %s", err)
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, os.Interrupt)
