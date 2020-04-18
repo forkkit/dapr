@@ -1,9 +1,12 @@
 package grpc
 
 import (
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/dapr/dapr/pkg/config"
+	"github.com/dapr/dapr/pkg/logger"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -23,5 +26,37 @@ func TestCertRenewal(t *testing.T) {
 		time.Sleep(time.Millisecond * 2200)
 		renew := shouldRenewCert(certExpiry, certDuration)
 		assert.True(t, renew)
+	})
+}
+
+func TestGetMiddlewareOptions(t *testing.T) {
+	t.Run("should enable two interceptors if tracing and metrics are enabled", func(t *testing.T) {
+		fakeServer := &server{
+			config: ServerConfig{},
+			tracingSpec: config.TracingSpec{
+				SamplingRate: "1",
+			},
+			renewMutex: &sync.Mutex{},
+			logger:     logger.NewLogger("dapr.runtime.grpc.test"),
+		}
+
+		serverOption := fakeServer.getMiddlewareOptions()
+
+		assert.Equal(t, 3, len(serverOption))
+	})
+
+	t.Run("should not disable middlewares even when SamplingRate is 0", func(t *testing.T) {
+		fakeServer := &server{
+			config: ServerConfig{},
+			tracingSpec: config.TracingSpec{
+				SamplingRate: "0",
+			},
+			renewMutex: &sync.Mutex{},
+			logger:     logger.NewLogger("dapr.runtime.grpc.test"),
+		}
+
+		serverOption := fakeServer.getMiddlewareOptions()
+
+		assert.Equal(t, 3, len(serverOption))
 	})
 }

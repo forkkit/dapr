@@ -9,8 +9,9 @@ import (
 	"fmt"
 	"os"
 
+	"log"
+
 	kube "github.com/dapr/dapr/tests/platforms/kubernetes"
-	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -42,11 +43,11 @@ func (c *KubeTestPlatform) setup() (err error) {
 
 func (c *KubeTestPlatform) tearDown() error {
 	if err := c.AppResources.tearDown(); err != nil {
-		log.Errorf("failed to tear down AppResources. got: %q", err)
+		fmt.Fprintf(os.Stderr, "failed to tear down AppResources. got: %q", err)
 	}
 
 	if err := c.ComponentResources.tearDown(); err != nil {
-		log.Errorf("failed to tear down ComponentResources. got: %q", err)
+		fmt.Fprintf(os.Stderr, "failed to tear down ComponentResources. got: %q", err)
 	}
 
 	// TODO: clean up kube cluster
@@ -146,4 +147,20 @@ func (c *KubeTestPlatform) Restart(name string) error {
 	}
 
 	return c.Scale(name, originalReplicas)
+}
+
+// OpenConnection opens a new connection to the app on a the target port and returns the local port or error
+func (c *KubeTestPlatform) OpenConnection(name string, targetPorts ...int) ([]int, error) {
+	app := c.AppResources.FindActiveResource(name)
+	appManager := app.(*kube.AppManager)
+
+	_, err := appManager.WaitUntilDeploymentState(appManager.IsDeploymentDone)
+	if err != nil {
+		return nil, err
+	}
+
+	if targetPorts == nil {
+		return nil, fmt.Errorf("cannot open connection with no target ports")
+	}
+	return appManager.DoPortForwarding("", targetPorts...)
 }

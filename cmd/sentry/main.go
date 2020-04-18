@@ -13,35 +13,56 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dapr/dapr/pkg/credentials"
+	"github.com/dapr/dapr/pkg/fswatcher"
+	"github.com/dapr/dapr/pkg/logger"
+	"github.com/dapr/dapr/pkg/metrics"
 	"github.com/dapr/dapr/pkg/sentry"
 	"github.com/dapr/dapr/pkg/sentry/config"
-	"github.com/dapr/dapr/pkg/sentry/watcher"
+	"github.com/dapr/dapr/pkg/sentry/monitoring"
 	"github.com/dapr/dapr/pkg/signals"
 	"github.com/dapr/dapr/pkg/version"
-	log "github.com/sirupsen/logrus"
+)
+
+var log = logger.NewLogger("dapr.sentry")
+
+const (
+	defaultCredentialsPath = "/var/run/dapr/credentials"
 )
 
 func main() {
-	logLevel := flag.String("log-level", "info", "Options are debug, info, warning, error, fatal, or panic. (default info)")
 	configName := flag.String("config", "default", "Path to config file, or name of a configuration object")
-	credsPath := flag.String("issuer-credentials", "/var/run/dapr/credentials", "Path to the credentials directory holding the issuer data")
+	credsPath := flag.String("issuer-credentials", defaultCredentialsPath, "Path to the credentials directory holding the issuer data")
 	trustDomain := flag.String("trust-domain", "localhost", "The CA trust domain")
+
+	loggerOptions := logger.DefaultOptions()
+	loggerOptions.AttachCmdFlags(flag.StringVar, flag.BoolVar)
+
+	metricsExporter := metrics.NewExporter(metrics.DefaultMetricNamespace)
+	metricsExporter.Options().AttachCmdFlags(flag.StringVar, flag.BoolVar)
 
 	flag.Parse()
 
-	parsedLogLevel, err := log.ParseLevel(*logLevel)
-	if err == nil {
-		log.SetLevel(parsedLogLevel)
-		log.Infof("log level set to: %s", parsedLogLevel)
-	} else {
-		log.Fatalf("invalid value for --log-level: %s", *logLevel)
+	// Apply options to all loggers
+	if err := logger.ApplyOptionsToLoggers(&loggerOptions); err != nil {
+		log.Fatal(err)
 	}
 
 	log.Infof("starting sentry certificate authority -- version %s -- commit %s", version.Version(), version.Commit())
+	log.Infof("log level set to: %s", loggerOptions.OutputLevel)
 
-	issuerCertPath := filepath.Join(*credsPath, config.IssuerCertFilename)
-	issuerKeyPath := filepath.Join(*credsPath, config.IssuerKeyFilename)
-	rootCertPath := filepath.Join(*credsPath, config.RootCertFilename)
+	// Initialize dapr metrics exporter
+	if err := metricsExporter.Init(); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := monitoring.InitMetrics(); err != nil {
+		log.Fatal(err)
+	}
+
+	issuerCertPath := filepath.Join(*credsPath, credentials.IssuerCertFilename)
+	issuerKeyPath := filepath.Join(*credsPath, credentials.IssuerKeyFilename)
+	rootCertPath := filepath.Join(*credsPath, credentials.RootCertFilename)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -49,7 +70,7 @@ func main() {
 	ctx := signals.Context()
 	config, err := config.FromConfigName(*configName)
 	if err != nil {
-		log.Warning(err)
+		log.Warn(err)
 	}
 	config.IssuerCertPath = issuerCertPath
 	config.IssuerKeyPath = issuerKeyPath
@@ -68,10 +89,12 @@ func main() {
 
 	<-ready
 
-	go watcher.StartIssuerWatcher(ctx, watchDir, issuerEvent)
+	go fswatcher.Watch(ctx, watchDir, issuerEvent)
+
 	go func() {
 		for range issuerEvent {
-			log.Warning("issuer credentials changed. reloading")
+			monitoring.IssuerCertChanged()
+			log.Warn("issuer credentials changed. reloading")
 			ca.Restart(ctx, config)
 		}
 	}()

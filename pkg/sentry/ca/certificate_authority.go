@@ -13,17 +13,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dapr/dapr/pkg/credentials"
+	"github.com/dapr/dapr/pkg/logger"
 	"github.com/dapr/dapr/pkg/sentry/certs"
 	"github.com/dapr/dapr/pkg/sentry/config"
 	"github.com/dapr/dapr/pkg/sentry/csr"
-	log "github.com/sirupsen/logrus"
 )
 
 const (
 	caOrg                      = "dapr.io/sentry"
-	caCommonName               = "sentry"
+	caCommonName               = "cluster.local"
 	selfSignedRootCertLifetime = time.Hour * 8760
 )
+
+var log = logger.NewLogger("dapr.sentry.ca")
 
 // CertificateAuthority represents an interface for a compliant Certificate Authority.
 // Responsibilities include loading trust anchors and issuer certs, providing safe access to the trust bundle,
@@ -138,13 +141,17 @@ func shouldCreateCerts(conf config.SentryConfig) bool {
 
 func (c *defaultCA) validateAndBuildTrustBundle() (*trustRootBundle, error) {
 	var issuerCreds *certs.Credentials
-	var err error
 	var rootCertBytes []byte
 	var issuerCertBytes []byte
 
 	// certs exist on disk, load them
 	if !shouldCreateCerts(c.config) {
-		issuerCreds, err = certs.PEMCredentialsFromFiles(c.config.IssuerKeyPath, c.config.IssuerCertPath)
+		certChain, err := credentials.LoadFromDisk(c.config.RootCertPath, c.config.IssuerCertPath, c.config.IssuerKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("error loading cert chain from disk: %s", err)
+		}
+
+		issuerCreds, err = certs.PEMCredentialsFromFiles(certChain.Cert, certChain.Key)
 		if err != nil {
 			return nil, fmt.Errorf("error reading PEM credentials: %s", err)
 		}
@@ -161,6 +168,7 @@ func (c *defaultCA) validateAndBuildTrustBundle() (*trustRootBundle, error) {
 	} else {
 		// create self signed root and issuer certs
 		log.Info("root and issuer certs not found: generating self signed CA")
+		var err error
 		issuerCreds, rootCertBytes, issuerCertBytes, err = c.generateRootAndIssuerCerts()
 		if err != nil {
 			return nil, fmt.Errorf("error generating trust root bundle: %s", err)

@@ -2,11 +2,13 @@ package handlers
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/dapr/dapr/pkg/kubernetes"
-	log "github.com/sirupsen/logrus"
+	"github.com/dapr/dapr/pkg/logger"
+	"github.com/dapr/dapr/pkg/operator/monitoring"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,13 +16,20 @@ import (
 )
 
 const (
-	daprEnabledAnnotationKey = "dapr.io/enabled"
-	daprIDAnnotationKey      = "dapr.io/id"
-	daprSidecarHTTPPortName  = "dapr-http"
-	daprSidecarGRPCPortName  = "dapr-grpc"
-	daprSidecarHTTPPort      = 3500
-	daprSidecarGRPCPort      = 50001
+	daprEnabledAnnotationKey        = "dapr.io/enabled"
+	appIDAnnotationKey              = "dapr.io/id"
+	daprMetricsPortKey              = "dapr.io/metrics-port"
+	daprSidecarHTTPPortName         = "dapr-http"
+	daprSidecarAPIGRPCPortName      = "dapr-grpc"
+	daprSidecarInternalGRPCPortName = "dapr-internal"
+	daprSidecarMetricsPortName      = "dapr-metrics"
+	daprSidecarHTTPPort             = 3500
+	daprSidecarAPIGRPCPort          = 50001
+	daprSidecarInternalGRPCPort     = 50002
+	defaultMetricsPort              = 9090
 )
+
+var log = logger.NewLogger("dapr.operator.handlers")
 
 // DaprHandler handles the lifetime for Dapr CRDs
 type DaprHandler struct {
@@ -41,7 +50,7 @@ func (h *DaprHandler) Init() error {
 	return nil
 }
 
-func (h *DaprHandler) createDaprService(name string, deployment *appsv1.Deployment) error {
+func (h *DaprHandler) createDaprService(name string, deployment *appsv1.Deployment, metricsPort int) error {
 	serviceName := fmt.Sprintf("%s-dapr", name)
 	exists := h.kubeAPI.ServiceExists(serviceName, deployment.GetNamespace())
 	if exists {
@@ -53,6 +62,11 @@ func (h *DaprHandler) createDaprService(name string, deployment *appsv1.Deployme
 		ObjectMeta: meta_v1.ObjectMeta{
 			Name:   serviceName,
 			Labels: map[string]string{daprEnabledAnnotationKey: "true"},
+			Annotations: map[string]string{
+				"prometheus.io/scrape": "true",
+				"prometheus.io/port":   strconv.Itoa(metricsPort),
+				"prometheus.io/path":   "/",
+			},
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: deployment.Spec.Selector.MatchLabels,
@@ -65,9 +79,20 @@ func (h *DaprHandler) createDaprService(name string, deployment *appsv1.Deployme
 				},
 				{
 					Protocol:   corev1.ProtocolTCP,
-					Port:       int32(daprSidecarGRPCPort),
-					TargetPort: intstr.FromInt(daprSidecarGRPCPort),
-					Name:       daprSidecarGRPCPortName,
+					Port:       int32(daprSidecarAPIGRPCPort),
+					TargetPort: intstr.FromInt(daprSidecarAPIGRPCPort),
+					Name:       daprSidecarAPIGRPCPortName,
+				}, {
+					Protocol:   corev1.ProtocolTCP,
+					Port:       int32(daprSidecarInternalGRPCPort),
+					TargetPort: intstr.FromInt(daprSidecarInternalGRPCPort),
+					Name:       daprSidecarInternalGRPCPortName,
+				},
+				{
+					Protocol:   corev1.ProtocolTCP,
+					Port:       int32(metricsPort),
+					TargetPort: intstr.FromInt(metricsPort),
+					Name:       daprSidecarMetricsPortName,
 				},
 			},
 		},
@@ -99,9 +124,9 @@ func (h *DaprHandler) deleteDaprService(name string, deployment *appsv1.Deployme
 	return nil
 }
 
-func (h *DaprHandler) getDaprID(deployment *appsv1.Deployment) string {
+func (h *DaprHandler) getAppID(deployment *appsv1.Deployment) string {
 	annotations := deployment.Spec.Template.ObjectMeta.Annotations
-	if val, ok := annotations[daprIDAnnotationKey]; ok && val != "" {
+	if val, ok := annotations[appIDAnnotationKey]; ok && val != "" {
 		return val
 	}
 
@@ -122,6 +147,17 @@ func (h *DaprHandler) isAnnotatedForDapr(deployment *appsv1.Deployment) bool {
 	}
 }
 
+func (h *DaprHandler) getMetricsPort(deployment *appsv1.Deployment) int {
+	annotations := deployment.Spec.Template.ObjectMeta.Annotations
+	metricsPort := defaultMetricsPort
+	if val, ok := annotations[daprMetricsPortKey]; ok {
+		if v, err := strconv.Atoi(val); err == nil {
+			metricsPort = v
+		}
+	}
+	return metricsPort
+}
+
 // ObjectCreated handles Dapr enabled deployment state changes
 func (h *DaprHandler) ObjectCreated(obj interface{}) {
 	h.deploymentsLock.Lock()
@@ -130,16 +166,19 @@ func (h *DaprHandler) ObjectCreated(obj interface{}) {
 	deployment := obj.(*appsv1.Deployment)
 	annotated := h.isAnnotatedForDapr(deployment)
 	if annotated {
-		id := h.getDaprID(deployment)
+		id := h.getAppID(deployment)
 		if id == "" {
 			log.Errorf("skipping service creation: id for deployment %s is empty", deployment.GetName())
 			return
 		}
 
-		err := h.createDaprService(id, deployment)
+		metricsPort := h.getMetricsPort(deployment)
+		err := h.createDaprService(id, deployment, metricsPort)
 		if err != nil {
 			log.Errorf("failed creating service for deployment %s: %s", deployment.GetName(), err)
 		}
+
+		monitoring.RecordServiceCreatedCount(id)
 	}
 }
 
@@ -155,7 +194,7 @@ func (h *DaprHandler) ObjectDeleted(obj interface{}) {
 	deployment := obj.(*appsv1.Deployment)
 	annotated := h.isAnnotatedForDapr(deployment)
 	if annotated {
-		id := h.getDaprID(deployment)
+		id := h.getAppID(deployment)
 		if id == "" {
 			log.Warnf("skipping service deletion: id for deployment %s is empty", deployment.GetName())
 			return
@@ -165,5 +204,7 @@ func (h *DaprHandler) ObjectDeleted(obj interface{}) {
 		if err != nil {
 			log.Errorf("failed deleting service for deployment %s: %s", deployment.GetName(), err)
 		}
+
+		monitoring.RecordServiceDeletedCount(id)
 	}
 }

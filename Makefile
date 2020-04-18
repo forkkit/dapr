@@ -68,11 +68,6 @@ export BINARY_EXT ?= $(BINARY_EXT_LOCAL)
 
 OUT_DIR := ./dist
 
-# Docker image build and push setting
-DOCKER:=docker
-DOCKERFILE_DIR?=./docker
-DOCKERFILE:=Dockerfile
-
 # Helm template and install setting
 HELM:=helm
 RELEASE_NAME?=dapr
@@ -96,7 +91,6 @@ else ifeq ($(DEBUG),0)
   BUILDTYPE_DIR:=release
   LDFLAGS:="$(DEFAULT_LDFLAGS) -s -w"
 else
-  DOCKERFILE:=Dockerfile-debug
   BUILDTYPE_DIR:=debug
   GCFLAGS:=-gcflags="all=-N -l"
   LDFLAGS:="$(DEFAULT_LDFLAGS)"
@@ -166,43 +160,6 @@ endef
 # Generate archive-*.[zip|tar.gz] targets
 $(foreach ITEM,$(BINARIES),$(eval $(call genArchiveBinary,$(ITEM),$(ARCHIVE_OUT_DIR))))
 
-################################################################################
-# Target: docker-build, docker-push                                            #
-################################################################################
-
-LINUX_BINS_OUT_DIR=$(OUT_DIR)/linux_$(GOARCH)
-DOCKER_IMAGE_TAG=$(DAPR_REGISTRY)/$(RELEASE_NAME):$(DAPR_TAG)
-
-ifeq ($(LATEST_RELEASE),true)
-DOCKER_IMAGE_LATEST_TAG=$(DAPR_REGISTRY)/$(RELEASE_NAME):$(LATEST_TAG)
-endif
-
-# check the required environment variables
-check-docker-env:
-ifeq ($(DAPR_REGISTRY),)
-	$(error DAPR_REGISTRY environment variable must be set)
-endif
-ifeq ($(DAPR_TAG),)
-	$(error DAPR_TAG environment variable must be set)
-endif
-
-# build docker image for linux
-docker-build: check-docker-env
-	$(info Building $(DOCKER_IMAGE_TAG) docker image ...)
-	$(DOCKER) build -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(LINUX_BINS_OUT_DIR)/. -t $(DOCKER_IMAGE_TAG)
-ifeq ($(LATEST_RELEASE),true)
-	$(info Building $(DOCKER_IMAGE_LATEST_TAG) docker image ...)
-	$(DOCKER) tag $(DOCKER_IMAGE_TAG) $(DOCKER_IMAGE_LATEST_TAG)
-endif
-
-# push docker image to the registry
-docker-push: docker-build
-	$(info Pushing $(DOCKER_IMAGE_TAG) docker image ...)
-	$(DOCKER) push $(DOCKER_IMAGE_TAG)
-ifeq ($(LATEST_RELEASE),true)
-	$(info Pushing $(DOCKER_IMAGE_LATEST_TAG) docker image ...)
-	$(DOCKER) push $(DOCKER_IMAGE_LATEST_TAG)
-endif
 
 ################################################################################
 # Target: manifest-gen                                                         #
@@ -215,7 +172,7 @@ dapr.yaml: check-docker-env
 	$(info Generating helm manifest $(HELM_MANIFEST_FILE)...)
 	@mkdir -p $(HELM_OUT_DIR)
 	$(HELM) template \
-		--set-string global.tag=$(DAPR_TAG) --set-string global.registry=$(DAPR_REGISTRY) $(HELM_CHART_DIR) > $(HELM_MANIFEST_FILE)
+		--include-crds=true --set dapr_config.dapr_config_chart_included=false --set-string global.tag=$(DAPR_TAG) --set-string global.registry=$(DAPR_REGISTRY) $(HELM_CHART_DIR) > $(HELM_MANIFEST_FILE)
 
 ################################################################################
 # Target: docker-deploy-k8s                                                    #
@@ -225,7 +182,7 @@ docker-deploy-k8s: check-docker-env
 	$(info Deploying ${DAPR_REGISTRY}/${RELEASE_NAME}:${DAPR_TAG} to the current K8S context...)
 	$(HELM) install \
 		$(RELEASE_NAME) --namespace=$(DAPR_NAMESPACE) \
-		--set-string global.tag=$(DAPR_TAG) --set-string global.registry=$(DAPR_REGISTRY) $(HELM_CHART_DIR)
+		--set-string global.tag=$(DAPR_TAG) --set-string global.registry=$(DAPR_REGISTRY) --set global.logAsJson=true $(HELM_CHART_DIR)
 
 ################################################################################
 # Target: archive                                                              #
@@ -246,15 +203,15 @@ test:
 # Due to https://github.com/golangci/golangci-lint/issues/580, we need to add --fix for windows
 .PHONY: lint
 lint:
-	$(GOLANGCI_LINT) run --fix
+	$(GOLANGCI_LINT) run --timeout=20m
 
-
-################################################################################
-# Target: tests                                                                #
-################################################################################
-include tests/dapr_tests.mk
 
 ################################################################################
 # Target: docker                                                                #
 ################################################################################
 include docker/docker.mk
+
+################################################################################
+# Target: tests                                                                #
+################################################################################
+include tests/dapr_tests.mk
